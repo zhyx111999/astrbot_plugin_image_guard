@@ -1,0 +1,2 @@
+# astrbot_plugin_image_guard
+基于多模态 LLM 的图片内容审查卫士。v1.6.4 新增智能过滤器，自动忽略 GIF 动图和 QQ 表情包，只审查普通静态图片。
