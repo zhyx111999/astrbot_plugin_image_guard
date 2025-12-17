@@ -1,0 +1,61 @@
+{
+  "group_scope": {
+    "description": "启用审查的群号列表。若包含 \"0\" 则监听所有群。若留空则不启用。",
+    "type": "list",
+    "default": ["0"],
+    "items": { "type": "string" }
+  },
+  "private_scope": {
+    "description": "启用审查的私聊用户(QQ)列表。若包含 \"0\" 则监听所有私聊。若留空则不启用。",
+    "type": "list",
+    "default": [],
+    "items": { "type": "string" }
+  },
+  "llm_model": {
+    "description": "自定义 LLM 模型名称（如 gpt-4o, gemini-1.5-pro）。留空则使用全局默认。",
+    "type": "string",
+    "default": ""
+  },
+  "llm_base_url": {
+    "description": "自定义 LLM Base URL（支持 OpenAI 格式中转站）。留空则使用全局默认。",
+    "type": "string",
+    "default": ""
+  },
+  "custom_vision_prompt": {
+    "description": "自定义识图引导词。用于增强模型对特定内容的识别能力。会被拼接到系统提示词中。",
+    "type": "string",
+    "default": "请对图片进行像素级的细节分析。特别关注地理位置（如地图边界、所含国家）、特定文字符号、以及任何可能被隐藏的违规元素。不要只看整体，要看局部细节。"
+  },
+  "sensitive_texts": {
+    "description": "图片中禁止出现的敏感文字列表（OCR）",
+    "type": "list",
+    "default": ["违禁词A", "违禁词B"],
+    "items": { "type": "string" }
+  },
+  "forbidden_descriptions": {
+    "description": "禁止出现的图片画面描述（语义检测，如：东亚地图、涩图）",
+    "type": "list",
+    "default": ["东亚地图", "裸露画面"],
+    "items": { "type": "string" }
+  },
+  "ban_duration": {
+    "description": "违规禁言时长（秒），0为不禁言",
+    "type": "int",
+    "default": 86400
+  },
+  "report_target_id": {
+    "description": "违规图片转发上报的目标ID（建议填 unified_msg_origin 格式，或纯数字 ID）。留空不转发。",
+    "type": "string",
+    "default": ""
+  },
+  "enable_recall": {
+    "description": "是否撤回违规图片",
+    "type": "bool",
+    "default": true
+  },
+  "check_probability": {
+    "description": "抽查概率 (0.0-1.0)，1.0为每图必查",
+    "type": "float",
+    "default": 1.0
+  }
+}
