@@ -113,6 +113,9 @@ class ImageGuard(Star):
             if custom_model: call_kwargs["model"] = custom_model
             custom_base_url = self.config.get("llm_base_url")
             if custom_base_url: call_kwargs["base_url"] = custom_base_url
+            # [新增] 注入 KEY
+            custom_api_key = self.config.get("llm_api_key")
+            if custom_api_key: call_kwargs["api_key"] = custom_api_key
 
             response = await provider.text_chat(**call_kwargs)
             
