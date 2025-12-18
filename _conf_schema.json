@@ -12,12 +12,17 @@
     "items": { "type": "string" }
   },
   "llm_model": {
-    "description": "自定义 LLM 模型名称（如 gpt-4o, gemini-1.5-pro）。留空则使用全局默认。",
+    "description": "模型名",
     "type": "string",
     "default": ""
   },
   "llm_base_url": {
-    "description": "自定义 LLM Base URL（支持 OpenAI 格式中转站）。留空则使用全局默认。",
+    "description": "URL",
+    "type": "string",
+    "default": ""
+  },
+  "llm_api_key": {
+    "description": "KEY",
     "type": "string",
     "default": ""
   },
