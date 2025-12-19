@@ -1,11 +1,13 @@
+import httpx
+import re
+import random
+import json
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Image, Plain
-import random
-import re
 
-@register("image_guard", "YEZI", "图片内容审查卫士", "1.6.5") # ⬆️ 版本号升级
+@register("image_guard", "YEZI", "图片内容审查卫士", "1.6.6") # 版本号升级
 class ImageGuard(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -26,26 +28,20 @@ class ImageGuard(Star):
         else:
             if "0" not in private_scope and user_id not in private_scope: return
 
-        # === 2. [修正] 表情包与GIF强过滤 (Sticker Filter) ===
-        # 优先从 original_event 获取原始 OneBot 消息链（字典列表）
+        # === 2. 表情包与GIF强过滤 (Sticker Filter) ===
         raw_chain = []
         try:
             if hasattr(event, "original_event") and hasattr(event.original_event, "message"):
                 raw_chain = event.original_event.message
             elif hasattr(event.message_obj, "raw_message"):
-                # 部分适配器原始消息在 raw_message 中
                 raw_chain = event.message_obj.raw_message
             
-            # 只有当 raw_chain 是列表且包含字典时才执行检查
             if isinstance(raw_chain, list):
                 for seg in raw_chain:
                     if isinstance(seg, dict) and seg.get("type") == "image":
                         data = seg.get("data", {})
-                        # sub_type: 0=正常图片, 1=表情包, 4=热图等
                         sub_type = int(data.get("sub_type", 0))
-                        if sub_type != 0:
-                            # logger.debug(f"[ImageGuard] 忽略表情包/贴图 (sub_type={sub_type})")
-                            return 
+                        if sub_type != 0: return # 忽略表情包
         except Exception:
             pass 
 
@@ -57,7 +53,6 @@ class ImageGuard(Star):
         for component in message_obj.message:
             if isinstance(component, Image):
                 if component.url:
-                    # 步骤B: 检查文件后缀 (过滤 GIF 动图)
                     clean_url = component.url.split('?')[0].lower()
                     if clean_url.endswith('.gif'):
                         continue
@@ -74,7 +69,7 @@ class ImageGuard(Star):
         
         if not forbidden_texts and not forbidden_descs: return
 
-        # === 6. 构建 Prompt ===
+        # === 6. 审核逻辑 ===
         custom_instruction = self.config.get("custom_vision_prompt", "")
         prompt = (
             "你是一个严格但公正的内容审核员。请分析图片是否包含违规信息。\n"
@@ -85,60 +80,88 @@ class ImageGuard(Star):
             "【输出格式要求】\n"
             "请严格按照以下两行格式输出，不要包含其他废话：\n"
             "REASON: [这里简要说明判断理由，不超过20字]\n"
-            "RESULT: [SAFE 或 VIOLATION]\n\n"
-            "【注意】\n"
-            "只有在你**非常确定**图片包含上述违规元素时才返回 VIOLATION。\n"
-            "如果是模棱两可的情况，请倾向于返回 SAFE，避免误判。"
+            "RESULT: [SAFE 或 VIOLATION]\n"
         )
 
         try:
-            # === 7. 获取 Provider ===
-            # 注意：此处无法通过 kwargs 动态修改 Provider 的 Model/API Key
-            # 除非你使用的 Provider 插件明确支持此行为。
-            # 这是一个已知限制，建议用户在 AstrBot 全局配置中指定 Vision 能力强的模型。
-            provider = self.context.get_using_provider()
-            if not provider: return
-
-            call_kwargs = {
-                "prompt": prompt,
-                "image_urls": image_urls,
-                "session_id": None
-            }
+            # [Fix] 优先使用独立配置的 LLM
+            response_text = await self._call_audit_llm(prompt, image_urls)
             
-            # 尝试注入参数（注意：大部分 Provider 会忽略这些）
-            custom_model = self.config.get("llm_model")
-            if custom_model: call_kwargs["model"] = custom_model # 仅供支持的 Provider 使用
-
-            response = await provider.text_chat(**call_kwargs)
-            
-            # === 8. 解析结果 ===
-            raw_text = ""
-            if response and response.completion_text:
-                raw_text = response.completion_text.strip()
-            
-            result_match = re.search(r"RESULT:\s*(VIOLATION|SAFE)", raw_text, re.IGNORECASE)
-            reason_match = re.search(r"REASON:\s*(.+)", raw_text, re.IGNORECASE)
+            # === 7. 解析结果 ===
+            result_match = re.search(r"RESULT:\s*(VIOLATION|SAFE)", response_text, re.IGNORECASE)
+            reason_match = re.search(r"REASON:\s*(.+)", response_text, re.IGNORECASE)
             
             is_violation = False
             reason_str = "未说明理由"
 
             if result_match and "VIOLATION" in result_match.group(1).upper():
                 is_violation = True
-            if not result_match and "VIOLATION" in raw_text.upper():
+            # 兜底检测
+            if not result_match and "VIOLATION" in response_text.upper():
                 is_violation = True
                 
             if reason_match:
                 reason_str = reason_match.group(1).strip()
             elif is_violation:
-                reason_str = raw_text.split('\n')[0][:50]
+                reason_str = response_text.split('\n')[0][:50]
 
-            # === 9. 判罚 ===
+            # === 8. 判罚 ===
             if is_violation:
                 logger.info(f"[ImageGuard] 违规命中: {reason_str}")
                 await self.enforce_penalty(event, image_urls[0], is_group, reason_str)
                 
         except Exception as e:
             logger.error(f"[ImageGuard] Check failed: {e}")
+
+    async def _call_audit_llm(self, prompt, image_urls):
+        """核心修复：支持独立 LLM 配置"""
+        custom_key = self.config.get("llm_api_key")
+        custom_base = self.config.get("llm_base_url")
+        custom_model = self.config.get("llm_model")
+
+        # 1. 独立配置模式 (httpx)
+        if custom_key and custom_base:
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt}
+                    ]
+                }
+            ]
+            # 添加图片
+            for url in image_urls:
+                messages[0]["content"].append({
+                    "type": "image_url",
+                    "image_url": {"url": url}
+                })
+
+            async with httpx.AsyncClient(timeout=30) as client:
+                payload = {
+                    "model": custom_model or "gpt-4o",
+                    "messages": messages,
+                    "max_tokens": 100
+                }
+                resp = await client.post(
+                    f"{custom_base.rstrip('/')}/v1/chat/completions",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {custom_key}"}
+                )
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"]
+        
+        # 2. 回退模式 (AstrBot Provider)
+        provider = self.context.get_using_provider()
+        if not provider:
+            raise ValueError("No provider available")
+        
+        # 即使是回退模式，也不要尝试注入 model 参数，因为不可靠
+        resp = await provider.text_chat(
+            prompt=prompt,
+            image_urls=image_urls,
+            session_id=None
+        )
+        return resp.completion_text
 
     async def enforce_penalty(self, event: AstrMessageEvent, violation_img_url: str, is_group: bool, reason: str):
         """执行判罚 (依赖 OneBot 协议)"""
@@ -148,18 +171,14 @@ class ImageGuard(Star):
         
         recalled = False
         banned = False
-        duration = self.config.get("ban_duration", 86400)
+        duration = int(self.config.get("ban_duration", 86400))
 
-        # 获取 Client
         client = None
-        if hasattr(event, "bot"): client = event.bot # OneBot V11 (NapCat/Lagrange)
-        elif hasattr(event, "client"): client = event.client # Gewechat etc.
+        if hasattr(event, "bot"): client = event.bot
+        elif hasattr(event, "client"): client = event.client
 
         if not client: return
-
-        # 检查是否支持 call_action (NapCat/OneBot 特性)
         if not hasattr(client, "api") or not hasattr(client.api, "call_action"):
-            logger.warning("[ImageGuard] 当前 Adapter 不支持 call_action API，无法执行撤回/禁言。")
             return
 
         # A. 撤回消息
