@@ -5,7 +5,7 @@ from astrbot.api.message_components import Image, Plain
 import random
 import re
 
-@register("image_guard", "YEZI", "图片内容审查卫士", "1.6.4")
+@register("image_guard", "YEZI", "图片内容审查卫士", "1.6.5") # ⬆️ 版本号升级
 class ImageGuard(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -26,28 +26,28 @@ class ImageGuard(Star):
         else:
             if "0" not in private_scope and user_id not in private_scope: return
 
-        # === [新增] 2. 表情包与GIF强过滤 (Sticker Filter) ===
-        # 步骤A: 检查 OneBot 原生 sub_type (过滤 QQ 表情包/贴图)
+        # === 2. [修正] 表情包与GIF强过滤 (Sticker Filter) ===
+        # 优先从 original_event 获取原始 OneBot 消息链（字典列表）
+        raw_chain = []
         try:
-            # 尝试获取原生消息链
-            raw_chain = []
-            if hasattr(event, "message") and isinstance(event.message, list):
-                raw_chain = event.message
-            elif hasattr(event, "original_event") and hasattr(event.original_event, "message"):
+            if hasattr(event, "original_event") and hasattr(event.original_event, "message"):
                 raw_chain = event.original_event.message
+            elif hasattr(event.message_obj, "raw_message"):
+                # 部分适配器原始消息在 raw_message 中
+                raw_chain = event.message_obj.raw_message
             
-            # 遍历原生片段
-            for seg in raw_chain:
-                if isinstance(seg, dict) and seg.get("type") == "image":
-                    data = seg.get("data", {})
-                    # sub_type: 0=正常图片, 1=表情包, 4=热图等
-                    # 我们只处理 sub_type == 0 的普通图片
-                    sub_type = int(data.get("sub_type", 0))
-                    if sub_type != 0:
-                        # logger.debug(f"[ImageGuard] 忽略表情包/贴图 (sub_type={sub_type})")
-                        return # 直接退出，不处理表情包
+            # 只有当 raw_chain 是列表且包含字典时才执行检查
+            if isinstance(raw_chain, list):
+                for seg in raw_chain:
+                    if isinstance(seg, dict) and seg.get("type") == "image":
+                        data = seg.get("data", {})
+                        # sub_type: 0=正常图片, 1=表情包, 4=热图等
+                        sub_type = int(data.get("sub_type", 0))
+                        if sub_type != 0:
+                            # logger.debug(f"[ImageGuard] 忽略表情包/贴图 (sub_type={sub_type})")
+                            return 
         except Exception:
-            pass # 如果获取失败，兜底走后缀判断
+            pass 
 
         # === 3. 提取图片 URL 并过滤 GIF ===
         message_obj = event.message_obj
@@ -58,15 +58,11 @@ class ImageGuard(Star):
             if isinstance(component, Image):
                 if component.url:
                     # 步骤B: 检查文件后缀 (过滤 GIF 动图)
-                    # 去除 URL 参数 (?xxxx) 后转小写检查
                     clean_url = component.url.split('?')[0].lower()
                     if clean_url.endswith('.gif'):
-                        # logger.debug("[ImageGuard] 忽略 GIF 动图")
                         continue
-                        
                     image_urls.append(component.url)
         
-        # 如果过滤后没有有效图片（全是 GIF 或 表情），则退出
         if not image_urls: return
 
         # === 4. 概率抽查 ===
@@ -75,6 +71,7 @@ class ImageGuard(Star):
         # === 5. 检查配置 ===
         forbidden_texts = self.config.get("sensitive_texts", [])
         forbidden_descs = self.config.get("forbidden_descriptions", [])
+        
         if not forbidden_texts and not forbidden_descs: return
 
         # === 6. 构建 Prompt ===
@@ -96,11 +93,10 @@ class ImageGuard(Star):
 
         try:
             # === 7. 获取 Provider ===
+            # 注意：此处无法通过 kwargs 动态修改 Provider 的 Model/API Key
+            # 除非你使用的 Provider 插件明确支持此行为。
+            # 这是一个已知限制，建议用户在 AstrBot 全局配置中指定 Vision 能力强的模型。
             provider = self.context.get_using_provider()
-            if not provider and hasattr(self.context, "provider_manager"):
-                pm = self.context.provider_manager
-                if getattr(pm, "default_provider_id", None):
-                    provider = self.context.get_provider_by_id(pm.default_provider_id)
             if not provider: return
 
             call_kwargs = {
@@ -108,14 +104,10 @@ class ImageGuard(Star):
                 "image_urls": image_urls,
                 "session_id": None
             }
-
+            
+            # 尝试注入参数（注意：大部分 Provider 会忽略这些）
             custom_model = self.config.get("llm_model")
-            if custom_model: call_kwargs["model"] = custom_model
-            custom_base_url = self.config.get("llm_base_url")
-            if custom_base_url: call_kwargs["base_url"] = custom_base_url
-            # [新增] 注入 KEY
-            custom_api_key = self.config.get("llm_api_key")
-            if custom_api_key: call_kwargs["api_key"] = custom_api_key
+            if custom_model: call_kwargs["model"] = custom_model # 仅供支持的 Provider 使用
 
             response = await provider.text_chat(**call_kwargs)
             
@@ -142,14 +134,14 @@ class ImageGuard(Star):
 
             # === 9. 判罚 ===
             if is_violation:
-                logger.info(f"[ImageGuard] 违规命中: {reason_str} | URL: {image_urls[0]}")
+                logger.info(f"[ImageGuard] 违规命中: {reason_str}")
                 await self.enforce_penalty(event, image_urls[0], is_group, reason_str)
                 
         except Exception as e:
             logger.error(f"[ImageGuard] Check failed: {e}")
 
     async def enforce_penalty(self, event: AstrMessageEvent, violation_img_url: str, is_group: bool, reason: str):
-        """执行判罚 (全链路底层 API 直连)"""
+        """执行判罚 (依赖 OneBot 协议)"""
         user_id = event.get_sender_id()
         group_id = event.get_group_id()
         user_name = event.get_sender_name()
@@ -158,11 +150,16 @@ class ImageGuard(Star):
         banned = False
         duration = self.config.get("ban_duration", 86400)
 
+        # 获取 Client
         client = None
-        if hasattr(event, "bot"): client = event.bot
-        elif hasattr(event, "client"): client = event.client
+        if hasattr(event, "bot"): client = event.bot # OneBot V11 (NapCat/Lagrange)
+        elif hasattr(event, "client"): client = event.client # Gewechat etc.
 
-        if not client:
+        if not client: return
+
+        # 检查是否支持 call_action (NapCat/OneBot 特性)
+        if not hasattr(client, "api") or not hasattr(client.api, "call_action"):
+            logger.warning("[ImageGuard] 当前 Adapter 不支持 call_action API，无法执行撤回/禁言。")
             return
 
         # A. 撤回消息
